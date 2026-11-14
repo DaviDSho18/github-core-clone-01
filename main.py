@@ -48,6 +48,11 @@ class ForgeHandler(BaseHTTPRequestHandler):
     server_version = "makefun-forge/1.0"
     sys_version = ""
 
+    #: The read benchmark is 2,000 sequential requests on one keep-alive connection. Nagle's
+    #: algorithm holds the small final segment of each answer until the peer's delayed ACK arrives,
+    #: which costs ~40 ms a request on a loopback socket; TCP_NODELAY is what removes it.
+    disable_nagle_algorithm = True
+
     #: The forge instance, installed on the server object by main().
     forge: Forge
 
