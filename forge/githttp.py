@@ -217,12 +217,37 @@ def fetch(repo: Repo, lines: list[bytes]) -> bytes:
             seen.add(oid)
             send.append(oid)
 
-    objects = [(t, p) for oid in send for t, p in [repo.objects[oid]]]
-    pack = g.build_pack(objects)
+    pack = _pack_of(repo, send, shallow_set)
     out += pk.pkt_text("packfile\n")
     out += pk.sideband(1, pack)
     out += pk.FLUSH
     return bytes(out)
+
+
+def _pack_of(repo: Repo, send: list[str], shallow_set: set[str]) -> bytes:
+    """The packfile for one fetch, built once per (object set, shallow boundary) and then reused.
+
+    The object set is fully determined by the wants and the shallow boundary -- the refs it came from
+    are already resolved -- so the same key returns the same bytes. A 50-clone round asks for the
+    identical pack 50 times; without this each one re-deflates 600 objects. The repository drops the
+    cache whenever a ref moves (store.RefMap), so a stale pack cannot outlive the state it describes.
+    """
+    key = (tuple(send), tuple(sorted(shallow_set)))
+    cached = repo.pack_cache.get(key)
+    if cached is not None:
+        return cached
+    entries = []
+    for oid in send:
+        entry = repo.deflated_of(oid)
+        if entry is None:
+            continue
+        entries.append(entry)
+    pack = g.build_pack_from_deflated(entries)
+    # Bound the cache: a push round writes 200 new tips, and each would otherwise keep a whole pack.
+    if len(repo.pack_cache) >= 8:
+        repo.pack_cache.clear()
+    repo.pack_cache[key] = pack
+    return pack
 
 
 def _deepen(repo: Repo, wants: list[str], haves: list[str], depth: int, relative: bool) -> set[str]:

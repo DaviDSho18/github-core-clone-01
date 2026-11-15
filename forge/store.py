@@ -9,12 +9,55 @@ from __future__ import annotations
 
 import json
 import threading
+import zlib
 
 from . import gitobj as g
 
 #: The ref namespace git keeps branches and tags in.
 HEADS = "refs/heads/"
 TAGS = "refs/tags/"
+
+
+class RefMap(dict):
+    """The ref table: a plain dict that tells its repository when a ref moves.
+
+    A packfile is built from the objects a ref reaches, so any write to a ref can change what a
+    later fetch must send. Hanging the invalidation on the write itself means every writer -- push,
+    contents, merge, GraphQL, MCP -- is covered without each one remembering to call anything.
+    """
+
+    __slots__ = ("_owner",)
+
+    def __init__(self, owner: "Repo"):
+        super().__init__()
+        self._owner = owner
+
+    def __setitem__(self, key, value):
+        if self.get(key) != value:
+            self._owner.invalidate_packs()
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._owner.invalidate_packs()
+
+    def pop(self, key, *default):
+        found = super().pop(key, *default)
+        self._owner.invalidate_packs()
+        return found
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._owner.invalidate_packs()
+
+    def clear(self):
+        super().clear()
+        self._owner.invalidate_packs()
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self._owner.invalidate_packs()
+        return super().setdefault(key, default)
 
 
 class StoreError(Exception):
@@ -32,7 +75,7 @@ class Repo:
         self.default_branch = default_branch
         self.created_at = created_at
         self.objects: dict[str, tuple[bytes, bytes]] = {}
-        self.refs: dict[str, str] = {}
+        self.refs: dict[str, str] = RefMap(self)
         self.issues: dict[int, dict] = {}
         self.pulls: dict[int, dict] = {}
         self.labels: dict[str, dict] = {}
@@ -40,6 +83,11 @@ class Repo:
         self.next_issue = 1
         self.next_pull = 1
         self.next_comment = 1
+        #: Deflated payloads, keyed by object id: (type_num, raw_size, deflated bytes). A packfile's
+        #: per-object bytes never change, so a fetch can rebuild one without recompressing anything.
+        self.deflated: dict[str, tuple[int, int, bytes]] = {}
+        #: Built packfiles, keyed by (tip, sorted shallow boundary). Dropped whenever a ref moves.
+        self.pack_cache: dict[tuple, bytes] = {}
 
     # ------------------------------------------------------------------ objects
 
@@ -47,6 +95,25 @@ class Repo:
         oid = g.hash_object(obj_type, payload)
         self.objects.setdefault(oid, (obj_type, payload))
         return oid
+
+    def deflated_of(self, oid: str) -> tuple[int, int, bytes] | None:
+        """The object's (type_num, raw_size, deflated payload), deflating it once and keeping it."""
+        found = self.deflated.get(oid)
+        if found is not None:
+            return found
+        obj = self.objects.get(oid)
+        if obj is None:
+            return None
+        obj_type, payload = obj
+        entry = (g.NUM_BY_TYPE[obj_type], len(payload), zlib.compress(payload, 6))
+        self.deflated[oid] = entry
+        return entry
+
+    def invalidate_packs(self) -> None:
+        """Forget every built packfile: a ref moved, so a pack's contents may differ now."""
+        cache = getattr(self, "pack_cache", None)
+        if cache:
+            cache.clear()
 
     def get_object(self, oid: str) -> tuple[bytes, bytes] | None:
         return self.objects.get(oid)

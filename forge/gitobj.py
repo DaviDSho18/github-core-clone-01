@@ -342,6 +342,24 @@ def build_pack(objects: list[tuple[bytes, bytes]]) -> bytes:
     return bytes(out)
 
 
+def build_pack_from_deflated(entries: list[tuple[int, int, bytes]]) -> bytes:
+    """A complete packfile from [(type_num, raw_size, deflated_payload)].
+
+    Byte-identical to ``build_pack`` for the same objects, but it skips the compression: the caller
+    supplies payloads that were deflated once and kept. A shallow clone of a 200-commit repository
+    deflates 600 small objects (~29 ms on this box, dominated by per-call zlib setup rather than the
+    bytes), and 50 concurrent clones pay that 50 times over for data that cannot change while the ref
+    stands still -- so the deflated form is what a repository caches, not the payload.
+    """
+    out = bytearray()
+    out += b"PACK" + struct.pack(">II", 2, len(entries))
+    for type_num, raw_size, deflated in entries:
+        out += encode_obj_header(type_num, raw_size)
+        out += deflated
+    out += hashlib.sha1(bytes(out)).digest()
+    return bytes(out)
+
+
 def verify_pack_checksum(data: bytes) -> bool:
     """True when a packfile's trailing sha1 matches its bytes."""
     if len(data) < 32 or data[:4] != b"PACK":

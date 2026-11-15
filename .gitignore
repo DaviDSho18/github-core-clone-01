@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+node-starter/
+BUILD_BRIEF.md
+PROMPT.md
+fakeenv.py
+prof_*.py
+run_local.sh
